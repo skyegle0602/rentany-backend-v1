@@ -357,10 +357,11 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
     }
 
     // Check if user is verified or admin
+    // At MVP stage: Only users with Stripe payment integration can list items
     if (user.role !== 'admin' && user.verification_status !== 'verified') {
       return res.status(403).json({
         success: false,
-        error: 'Identity verification required to list items',
+        error: 'Stripe payment integration required to list items. Please connect your payment account.',
       })
     }
 

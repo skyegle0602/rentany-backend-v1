@@ -313,110 +313,42 @@ router.post('/webhook', async (req: Request, res: Response) => {
   })
 
   try {
-    // Handle Identity verification session events
-    if (event.type.startsWith('identity.verification_session.')) {
-      console.log('🔐 Processing Identity verification session event...')
-      const session = event.data.object as Stripe.Identity.VerificationSession
-
-      console.log('📋 Verification session details:', {
-        id: session.id,
-        status: session.status,
-        type: session.type,
-        metadata: session.metadata,
+    // Handle Stripe webhook events
+    // Handle account.updated event to mark users as verified when account becomes active
+    if (event.type === 'account.updated') {
+      const account = event.data.object as Stripe.Account
+      console.log('📋 Account updated event:', {
+        id: account.id,
+        details_submitted: account.details_submitted,
+        payouts_enabled: account.payouts_enabled,
       })
 
-      // Get user_id from metadata
-      const userId = session.metadata?.user_id
+      // Find user by stripe_account_id
+      const User = (await import('../models/users')).default
+      const user = await User.findOne({ stripe_account_id: account.id })
 
-      if (!userId) {
-        console.warn('⚠️  Verification session missing user_id in metadata')
-        console.warn('   Session metadata:', session.metadata)
-        console.warn('   This session may not be associated with a user')
-        return res.json({ received: true })
-      }
-
-      console.log('👤 Found user_id in metadata:', userId)
-
-      // Map Stripe status to our verification_status
-      // In test mode, if webhook is received successfully, treat it as verified
-      // This is because it's difficult to get the actual 'verified' event in test mode
-      let verificationStatus: 'verified' | 'pending' | 'failed' | 'unverified' = 'pending'
-
-      const eventType = event.type as string
-      if (eventType === 'identity.verification_session.verified') {
-        verificationStatus = 'verified'
-        console.log('✅ Verification session VERIFIED')
-      } else if (eventType === 'identity.verification_session.requires_input' || 
-                 eventType === 'identity.verification_session.processing') {
-        // In test mode: If webhook is successfully received, treat as verified
-        // This makes testing easier since getting actual 'verified' event is difficult
-        verificationStatus = 'verified'
-        console.log('⏳ Verification session received (requires_input/processing)')
-        console.log('✅ Treating as VERIFIED since webhook was successfully received (test mode behavior)')
-      } else if (eventType === 'identity.verification_session.canceled') {
-        verificationStatus = 'failed'
-        console.log('❌ Verification session CANCELED')
-      } else {
-        console.log('ℹ️  Unhandled verification session event type:', eventType)
-        // For any other event type, if webhook is received successfully, treat as verified
-        verificationStatus = 'verified'
-        console.log('✅ Treating as VERIFIED since webhook was successfully received')
-      }
-
-      console.log('💾 Updating user verification status in MongoDB...')
-      console.log('   User ID:', userId)
-      console.log('   New status:', verificationStatus)
-
-      // Update user verification status in MongoDB
-      try {
-        const updatedUser = await updateUser(userId, {
-          verification_status: verificationStatus,
-        })
-
-        if (updatedUser) {
-          console.log(`✅ Successfully updated verification status for user ${userId}: ${verificationStatus}`)
+      if (user) {
+        // Only mark as verified if account is fully connected and payouts are enabled
+        if (account.details_submitted && account.payouts_enabled) {
+          await updateUser(user.clerk_id, {
+            verification_status: 'verified',
+            payouts_enabled: true,
+          } as any)
+          console.log(`✅ Marked user ${user.clerk_id} as verified - account is active`)
         } else {
-          console.warn(`⚠️  User ${userId} not found in MongoDB. Verification status not updated.`)
-          console.warn('   This may happen if the user was deleted or the user_id in metadata is incorrect.')
+          // Account exists but not fully connected yet
+          await updateUser(user.clerk_id, {
+            payouts_enabled: account.payouts_enabled || false,
+            verification_status: 'unverified', // Not verified until account is fully connected
+          } as any)
+          console.log(`ℹ️  User ${user.clerk_id} account not fully connected yet`)
         }
-      } catch (updateError: any) {
-        console.error(`❌ Failed to update user verification status for ${userId}:`)
-        console.error('   Error:', updateError.message)
-        
-        // If it's a Clerk 404 error, the user doesn't exist in Clerk
-        // But we should still try to update MongoDB if the user exists there
-        if (updateError.status === 404 && updateError.clerkError) {
-          console.warn('   User does not exist in Clerk. Checking if user exists in MongoDB...')
-          
-          // Try to update directly in MongoDB without Clerk sync
-          try {
-            const User = (await import('../models/users')).default
-            const directUpdate = await User.findOneAndUpdate(
-              { clerk_id: userId },
-              {
-                $set: {
-                  verification_status: verificationStatus,
-                  updated_at: new Date(),
-                },
-              },
-              { new: true }
-            )
-            
-            if (directUpdate) {
-              console.log(`✅ Updated user ${userId} directly in MongoDB (Clerk user not found)`)
-            } else {
-              console.error(`❌ User ${userId} not found in MongoDB either. Cannot update verification status.`)
-            }
-          } catch (mongoError: any) {
-            console.error('   MongoDB direct update also failed:', mongoError.message)
-          }
-        }
+      } else {
+        console.warn(`⚠️  No user found with stripe_account_id: ${account.id}`)
       }
-
-      console.log('📊 Event processed:', event.type)
     } else {
       console.log('ℹ️  Unhandled Stripe event type:', event.type)
-      console.log('   This webhook handler only processes identity.verification_session.* events')
+      console.log('   Add event handlers for specific event types as needed')
     }
 
     console.log('✅ ===== STRIPE WEBHOOK PROCESSED SUCCESSFULLY =====')
@@ -466,7 +398,7 @@ router.post('/connect/onboarding', requireAuth, async (req: Request, res: Respon
       })
     }
 
-    const { origin } = req.body
+    const { origin, return_path } = req.body
 
     // Check if user already has a Stripe Connect account
     let accountId = (user as any).stripe_account_id
@@ -485,16 +417,38 @@ router.post('/connect/onboarding', requireAuth, async (req: Request, res: Respon
       accountId = account.id
 
       // Save account ID to user
+      // Don't mark as verified yet - wait until account is fully connected (details_submitted = true)
       await updateUser(userId, {
         stripe_account_id: accountId,
       } as any)
+      
+      console.log(`✅ Created Stripe Connect account for user ${userId}`)
+    } else {
+      // User already has an account - check if it's active and mark as verified if so
+      const account = await stripe.accounts.retrieve(accountId)
+      if (account.details_submitted && account.payouts_enabled) {
+        // Account is fully connected - mark as verified
+        await updateUser(userId, {
+          verification_status: 'verified',
+        } as any)
+        console.log(`✅ Account for user ${userId} is active - marked as verified`)
+      }
     }
+
+    // Determine return URL - use provided return_path or default to profile wallet
+    const returnUrl = return_path 
+      ? `${origin}${return_path}?stripe=success`
+      : `${origin}/profile?tab=wallet&stripe=success`
+    
+    const refreshUrl = return_path
+      ? `${origin}${return_path}`
+      : `${origin}/profile?tab=wallet`
 
     // Create account link for onboarding
     const accountLink = await stripe.accountLinks.create({
       account: accountId,
-      refresh_url: `${origin}/profile?tab=wallet`,
-      return_url: `${origin}/profile?tab=wallet&stripe=success`,
+      refresh_url: refreshUrl,
+      return_url: returnUrl,
       type: 'account_onboarding',
     })
 
@@ -546,6 +500,8 @@ router.get('/connect/status', requireAuth, async (req: Request, res: Response) =
 
     const accountId = (user as any).stripe_account_id
     if (!accountId) {
+      // User doesn't have Stripe account - return not connected status
+      // Don't modify verification_status here - it should only be set during onboarding
       return res.json({
         success: true,
         data: {
@@ -558,7 +514,8 @@ router.get('/connect/status', requireAuth, async (req: Request, res: Response) =
     // Retrieve account from Stripe
     const account = await stripe.accounts.retrieve(accountId)
 
-    // Update user's payout status
+    // Update user's payout status only
+    // Don't modify verification_status here - it should only be set during onboarding
     await updateUser(userId, {
       payouts_enabled: account.payouts_enabled || false,
     } as any)

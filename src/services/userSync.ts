@@ -37,7 +37,7 @@ export async function syncUserFromClerk(clerkUserId: string): Promise<(Document 
     }
 
     // Prepare user data for MongoDB
-    // IMPORTANT: verification_status is NOT synced from Clerk - it's managed by Stripe Identity
+    // Note: verification_status is managed separately (e.g., via Clerk email verification)
     // We only set it to 'unverified' for new users via $setOnInsert
     const userData = {
       clerk_id: clerkUser.id,
@@ -49,7 +49,7 @@ export async function syncUserFromClerk(clerkUserId: string): Promise<(Document 
     }
 
     // Find existing user or create new one
-    // Important: We do NOT set verification_status in $set to preserve existing Stripe Identity status
+    // Important: We do NOT set verification_status in $set to preserve existing verification status
     // Only set it to 'unverified' for new users via $setOnInsert
     const user = await User.findOneAndUpdate(
       { clerk_id: clerkUserId },

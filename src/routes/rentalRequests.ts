@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { requireAuth, getAuth } from '../middleware/clerk'
 import RentalRequest from '../models/rentalRequests'
+import { getOrSyncUser } from '../services/userSync'
 
 const router = Router()
 
@@ -102,6 +103,24 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         error: 'Missing required fields: item_id, renter_email, owner_email, start_date, end_date, total_amount',
+      })
+    }
+
+    // Verify user exists and is verified (or admin)
+    // At MVP stage: Only users with Stripe payment integration can book/rent items
+    const user = await getOrSyncUser(userId)
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found',
+      })
+    }
+
+    // Check if user is verified or admin
+    if (user.role !== 'admin' && user.verification_status !== 'verified') {
+      return res.status(403).json({
+        success: false,
+        error: 'Stripe payment integration required to book items. Please connect your payment account.',
       })
     }
 

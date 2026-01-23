@@ -131,7 +131,6 @@ app.use('/api', publicRoutes)
 // Import other route handlers
 import usersRouter from './routes/users'
 // Note: stripeRouter is already imported above for webhook route
-import verificationRouter from './routes/verification'
 // @ts-ignore - TypeScript cache issue, file exists and exports correctly
 import reviewsRouter from './routes/reviews'
 import itemsRouter from './routes/items'
@@ -148,7 +147,6 @@ import disputesRouter from './routes/disputes'
 app.use('/api/users', usersRouter)
 app.use('/api/stripe', stripeRouter)
 app.use('/api/webhooks', webhooksRouter) // Webhooks don't need auth middleware (already imported above)
-app.use('/api/verification', verificationRouter)
 app.use('/api/reviews', reviewsRouter)
 app.use('/api/items', itemsRouter)
 app.use('/api/file', filesRouter)

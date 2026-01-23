@@ -3,7 +3,6 @@ import { Webhook } from 'svix'
 import { syncUserFromClerk } from '../services/userSync'
 import { CLERK_WEBHOOK_SECRET, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET } from '../config/env'
 import Stripe from 'stripe'
-import { getOrSyncUser, updateUser } from '../services/userSync'
 
 const router = Router()
 
@@ -121,13 +120,15 @@ router.post('/clerk', async (req: Request, res: Response) => {
 
 /**
  * POST /api/webhooks/stripe
- * Stripe webhook endpoint for Identity verification events
- * Handles identity.verification_session events to update user verification status
+ * Stripe webhook endpoint
+ * 
+ * Note: Stripe Identity verification has been removed
+ * Add other Stripe event handlers here as needed
  * 
  * To set up:
  * 1. Go to Stripe Dashboard -> Developers -> Webhooks
  * 2. Add endpoint: https://your-domain.com/api/webhooks/stripe
- * 3. Select events: identity.verification_session.verified, identity.verification_session.requires_input, identity.verification_session.processing
+ * 3. Select events you want to handle
  * 4. Copy the webhook signing secret (starts with whsec_) to STRIPE_WEBHOOK_SECRET in .env
  */
 router.post('/stripe', async (req: Request, res: Response) => {
@@ -135,35 +136,19 @@ router.post('/stripe', async (req: Request, res: Response) => {
   console.log('📥 Request received at:', new Date().toISOString())
   console.log('📍 Path:', req.path)
   console.log('🌐 Method:', req.method)
-  console.log('📋 Headers:', {
-    'content-type': req.headers['content-type'],
-    'stripe-signature': req.headers['stripe-signature'] ? 'Present ✅' : 'Missing ❌',
-    'user-agent': req.headers['user-agent'],
-  })
 
   const WEBHOOK_SECRET = STRIPE_WEBHOOK_SECRET
 
   if (!WEBHOOK_SECRET) {
     console.error('❌ STRIPE_WEBHOOK_SECRET is missing from environment variables')
-    console.error('   Make sure you have STRIPE_WEBHOOK_SECRET=whsec_xxx in your .env file')
-    console.error('   Get it from: Stripe Dashboard -> Webhooks -> Your endpoint -> Signing secret')
     return res.status(500).json({
       success: false,
       error: 'Webhook secret not configured',
     })
   }
 
-  if (!WEBHOOK_SECRET.startsWith('whsec_')) {
-    console.error('❌ STRIPE_WEBHOOK_SECRET format is incorrect!')
-    console.error('   Expected format: whsec_xxxxx (webhook signing secret)')
-    console.error('   Current value starts with:', WEBHOOK_SECRET.substring(0, 10))
-    console.error('   ⚠️  Make sure you are NOT using STRIPE_SECRET_KEY (sk_test_xxx)')
-    console.error('   Use the webhook signing secret from Stripe Dashboard')
-  }
-
   if (!stripe) {
     console.error('❌ Stripe is not initialized')
-    console.error('   Check if STRIPE_SECRET_KEY is set in .env')
     return res.status(500).json({
       success: false,
       error: 'Stripe is not configured',
@@ -175,24 +160,16 @@ router.post('/stripe', async (req: Request, res: Response) => {
 
   if (!sig) {
     console.error('❌ Missing stripe-signature header')
-    console.error('   This request may not be from Stripe')
     return res.status(400).json({
       success: false,
       error: 'Missing stripe-signature header',
     })
   }
 
-  console.log('🔐 Webhook signature found, verifying...')
-  console.log('📦 Body type:', typeof req.body)
-  console.log('📦 Body is Buffer:', Buffer.isBuffer(req.body))
-  console.log('📦 Body length:', req.body ? (Buffer.isBuffer(req.body) ? req.body.length : JSON.stringify(req.body).length) : 0)
-
   let event: Stripe.Event
 
   // Verify the webhook signature
   try {
-    // req.body is already a Buffer from express.raw() middleware
-    console.log('🔍 Attempting to verify webhook signature...')
     event = stripe.webhooks.constructEvent(
       req.body,
       sig,
@@ -204,10 +181,6 @@ router.post('/stripe', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('❌ Webhook signature verification FAILED!')
     console.error('   Error:', err.message)
-    console.error('   This could mean:')
-    console.error('   1. Wrong STRIPE_WEBHOOK_SECRET in .env (should be whsec_xxx)')
-    console.error('   2. Request body was corrupted (check if express.raw() is applied)')
-    console.error('   3. Request is not from Stripe')
     return res.status(400).json({
       success: false,
       error: `Webhook signature verification failed: ${err.message}`,
@@ -215,77 +188,45 @@ router.post('/stripe', async (req: Request, res: Response) => {
   }
 
   console.log(`📥 Stripe webhook event received: ${event.type}`)
-  console.log('📋 Event data:', {
-    id: event.id,
-    type: event.type,
-    created: new Date(event.created * 1000).toISOString(),
-    livemode: event.livemode,
-  })
 
   try {
-    // Handle Identity verification session events
-    if (event.type.startsWith('identity.verification_session.')) {
-      console.log('🔐 Processing Identity verification session event...')
-      const session = event.data.object as Stripe.Identity.VerificationSession
-
-      console.log('📋 Verification session details:', {
-        id: session.id,
-        status: session.status,
-        type: session.type,
-        metadata: session.metadata,
+    // Handle Stripe webhook events
+    // Handle account.updated event to mark users as verified when account becomes active
+    if (event.type === 'account.updated') {
+      const account = event.data.object as Stripe.Account
+      console.log('📋 Account updated event:', {
+        id: account.id,
+        details_submitted: account.details_submitted,
+        payouts_enabled: account.payouts_enabled,
       })
 
-      // Get user_id from metadata
-      const userId = session.metadata?.user_id
+      // Find user by stripe_account_id
+      const User = (await import('../models/users')).default
+      const { updateUser } = await import('../services/userSync')
+      const user = await User.findOne({ stripe_account_id: account.id })
 
-      if (!userId) {
-        console.warn('⚠️  Verification session missing user_id in metadata')
-        console.warn('   Session metadata:', session.metadata)
-        console.warn('   This session may not be associated with a user')
-        return res.json({ received: true })
-      }
-
-      console.log('👤 Found user_id in metadata:', userId)
-
-      // Map Stripe status to our verification_status
-      // In test mode: If webhook is received successfully (200 OK), treat it as verified
-      // This makes testing easier since getting actual 'verified' event is difficult
-      let verificationStatus: 'verified' | 'pending' | 'failed' | 'unverified' = 'pending'
-
-      const eventType = event.type as string
-      if (eventType === 'identity.verification_session.verified') {
-        verificationStatus = 'verified'
-        console.log('✅ Verification session VERIFIED')
-      } else if (eventType === 'identity.verification_session.requires_input' || 
-                 eventType === 'identity.verification_session.processing') {
-        // In test mode: If webhook is successfully received, treat as verified
-        verificationStatus = 'verified'
-        console.log('⏳ Verification session received (requires_input/processing)')
-        console.log('✅ Treating as VERIFIED since webhook was successfully received (test mode behavior)')
-      } else if (eventType === 'identity.verification_session.canceled') {
-        verificationStatus = 'failed'
-        console.log('❌ Verification session CANCELED')
+      if (user) {
+        // Only mark as verified if account is fully connected and payouts are enabled
+        if (account.details_submitted && account.payouts_enabled) {
+          await updateUser(user.clerk_id, {
+            verification_status: 'verified',
+            payouts_enabled: true,
+          } as any)
+          console.log(`✅ Marked user ${user.clerk_id} as verified - account is active`)
+        } else {
+          // Account exists but not fully connected yet
+          await updateUser(user.clerk_id, {
+            payouts_enabled: account.payouts_enabled || false,
+            verification_status: 'unverified', // Not verified until account is fully connected
+          } as any)
+          console.log(`ℹ️  User ${user.clerk_id} account not fully connected yet`)
+        }
       } else {
-        console.log('ℹ️  Unhandled verification session event type:', eventType)
-        // For any other event type, if webhook is received successfully, treat as verified
-        verificationStatus = 'verified'
-        console.log('✅ Treating as VERIFIED since webhook was successfully received')
+        console.warn(`⚠️  No user found with stripe_account_id: ${account.id}`)
       }
-
-      console.log('💾 Updating user verification status in MongoDB...')
-      console.log('   User ID:', userId)
-      console.log('   New status:', verificationStatus)
-
-      // Update user verification status in MongoDB
-      await updateUser(userId, {
-        verification_status: verificationStatus,
-      })
-
-      console.log(`✅ Successfully updated verification status for user ${userId}: ${verificationStatus}`)
-      console.log('📊 Event processed:', event.type)
     } else {
       console.log('ℹ️  Unhandled Stripe event type:', event.type)
-      console.log('   This webhook handler only processes identity.verification_session.* events')
+      console.log('   Add event handlers for specific event types as needed')
     }
 
     console.log('✅ ===== STRIPE WEBHOOK PROCESSED SUCCESSFULLY =====')
