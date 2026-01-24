@@ -514,11 +514,19 @@ router.get('/connect/status', requireAuth, async (req: Request, res: Response) =
     // Retrieve account from Stripe
     const account = await stripe.accounts.retrieve(accountId)
 
-    // Update user's payout status only
-    // Don't modify verification_status here - it should only be set during onboarding
+    // Check if account is fully connected and update verification status accordingly
+    const isFullyConnected = account.details_submitted && account.payouts_enabled
+    const shouldBeVerified = isFullyConnected
+
+    // Update user's payout status and verification status
     await updateUser(userId, {
       payouts_enabled: account.payouts_enabled || false,
+      verification_status: shouldBeVerified ? 'verified' : 'unverified',
     } as any)
+
+    if (shouldBeVerified && (user as any).verification_status !== 'verified') {
+      console.log(`✅ User ${userId} account is fully connected - marked as verified (via status check)`)
+    }
 
     res.json({
       success: true,
@@ -526,6 +534,9 @@ router.get('/connect/status', requireAuth, async (req: Request, res: Response) =
         payouts_enabled: account.payouts_enabled || false,
         status: account.details_submitted ? 'active' : 'pending',
         requirements: account.requirements?.currently_due || [],
+        verified: shouldBeVerified,
+        details_submitted: account.details_submitted,
+        payouts_enabled_stripe: account.payouts_enabled,
       },
     })
   } catch (error: any) {
@@ -533,6 +544,65 @@ router.get('/connect/status', requireAuth, async (req: Request, res: Response) =
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to check account status',
+    })
+  }
+})
+
+/**
+ * POST /api/stripe/connect/dashboard
+ * Get Stripe Express Dashboard login link for user
+ */
+router.post('/connect/dashboard', requireAuth, async (req: Request, res: Response) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({
+        success: false,
+        error: 'Stripe is not configured',
+      })
+    }
+
+    // Get authenticated user using getAuth helper to avoid deprecation warnings
+    const auth = getAuth(req)
+    const userId = auth?.userId
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized',
+      })
+    }
+
+    const user = await getOrSyncUser(userId)
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found',
+      })
+    }
+
+    const accountId = (user as any).stripe_account_id
+    if (!accountId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Stripe account not connected. Please complete onboarding first.',
+      })
+    }
+
+    const { origin } = req.body
+
+    // Create login link for Stripe Express Dashboard
+    const loginLink = await stripe.accounts.createLoginLink(accountId)
+
+    res.json({
+      success: true,
+      data: {
+        url: loginLink.url,
+      },
+    })
+  } catch (error: any) {
+    console.error('Error creating Stripe dashboard link:', error)
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to create dashboard link',
     })
   }
 })
