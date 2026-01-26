@@ -2,33 +2,13 @@ import { Router, Request, Response } from 'express'
 import { requireAuth } from '../middleware/clerk'
 import multer from 'multer'
 import path from 'path'
-import fs from 'fs'
-import { v4 as uuidv4 } from 'uuid'
-import { PORT } from '../config/env'
+import { uploadToS3 } from '../services/s3'
 
 const router = Router()
 
-// Configure multer for file uploads
-// For now, we'll store files in a local 'uploads' directory
-// In production, you should use cloud storage (AWS S3, Cloudinary, etc.)
-
-// Ensure uploads directory exists
-const uploadsDir = path.join(process.cwd(), 'uploads')
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true })
-}
-
-// Configure storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadsDir)
-  },
-  filename: (req, file, cb) => {
-    // Generate unique filename: timestamp-uuid-originalname
-    const uniqueName = `${Date.now()}-${uuidv4()}${path.extname(file.originalname)}`
-    cb(null, uniqueName)
-  },
-})
+// Configure multer to use memory storage (we'll upload to S3)
+// Files are stored in memory as Buffer before uploading to S3
+const storage = multer.memoryStorage()
 
 // File filter - only allow images and videos
 const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
@@ -116,33 +96,45 @@ router.post('/upload', requireAuth, (req, res, next) => {
 
     const file = req.file
 
-    // Construct file URL
-    // In production, this should be your CDN/cloud storage URL
-    // For now, using local file path that can be served statically
-    // Use full URL with backend server address
-    const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`
-    const fileUrl = `${BACKEND_URL}/uploads/${file.filename}`
+    // Determine if file is image or video
+    const isVideo = file.mimetype.startsWith('video/')
+    const folder: 'images' | 'videos' = isVideo ? 'videos' : 'images'
 
-    console.log(`✅ File uploaded: ${file.originalname} by user ${auth?.userId || 'unknown'}`)
-    console.log(`   Saved as: ${file.filename}`)
+    // Upload to S3
+    const { key, url } = await uploadToS3(
+      file.buffer,
+      file.originalname,
+      folder
+    )
+
+    console.log(`✅ File uploaded to S3: ${file.originalname} by user ${auth?.userId || 'unknown'}`)
+    console.log(`   S3 Key: ${key}`)
+    console.log(`   S3 URL: ${url}`)
     console.log(`   Size: ${file.size} bytes`)
     console.log(`   Type: ${file.mimetype}`)
 
     res.json({
       success: true,
       data: {
-        file_url: fileUrl,
-        file_id: file.filename,
+        file_url: url,
+        file_id: key, // Use S3 key as file_id
         file_name: file.originalname,
         file_size: file.size,
         file_type: file.mimetype,
       },
     })
   } catch (error) {
-    console.error('Error uploading file:', error)
+    console.error('❌ Error uploading file to S3:', error)
+    if (error instanceof Error) {
+      console.error('   Error message:', error.message)
+      console.error('   Error stack:', error.stack)
+    }
+    
+    const errorMessage = error instanceof Error ? error.message : 'Failed to upload file'
+    
     res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Failed to upload file',
+      error: errorMessage,
     })
   }
 })

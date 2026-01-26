@@ -79,8 +79,10 @@ app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 
 // Serve uploaded files statically with CORS headers
-// IMPORTANT: This must be BEFORE authentication middleware to allow public access
-// In production, use a CDN or cloud storage instead
+// NOTE: This is now disabled as files are served from AWS S3
+// Keeping this commented for backward compatibility with old local files if needed
+// Files are now uploaded to S3 bucket 'rentany-uploads' via /api/file/upload endpoint
+/*
 app.use('/uploads', cors({
   origin: (origin, callback) => {
     // Allow requests from frontend URL or no origin (direct requests)
@@ -110,6 +112,7 @@ app.use('/uploads', cors({
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
   },
 }))
+*/
 
 // Clerk authentication middleware
 // This must be applied before routes to extract user data
