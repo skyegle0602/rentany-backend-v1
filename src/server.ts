@@ -4,7 +4,7 @@ import helmet from 'helmet'
 import path from 'path'
 import { clerkAuth, publicRoutes } from './middleware/clerk'
 import { connectDatabase } from './config/database'
-import { PORT, FRONTEND_URL, CLERK_SECRET_KEY, CLERK_PUBLISHABLE_KEY, STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, MONGODB_URI } from './config/env'
+import { PORT, FRONTEND_URL, ALLOWED_ORIGINS, CLERK_SECRET_KEY, CLERK_PUBLISHABLE_KEY, STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, MONGODB_URI } from './config/env'
 
 const app: Express = express()
 
@@ -15,8 +15,42 @@ app.use(helmet({
 }))
 
 // CORS configuration
+// Supports multiple origins for both localhost (development) and production
 app.use(cors({
-  origin: FRONTEND_URL,
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) {
+      return callback(null, true)
+    }
+    
+    // Normalize origin by removing trailing slashes for comparison
+    const normalizedOrigin = origin.replace(/\/+$/, '').toLowerCase()
+    
+    // Check against all allowed origins
+    for (const allowedOrigin of ALLOWED_ORIGINS) {
+      const normalizedAllowed = allowedOrigin.replace(/\/+$/, '').toLowerCase()
+      
+      // Exact match
+      if (normalizedOrigin === normalizedAllowed) {
+        return callback(null, true)
+      }
+      
+      // Check if origin starts with allowed origin (for subdomains)
+      if (normalizedOrigin.startsWith(normalizedAllowed)) {
+        return callback(null, true)
+      }
+    }
+    
+    // In development, also allow localhost with any port
+    if (process.env.NODE_ENV !== 'production' && normalizedOrigin.includes('localhost')) {
+      return callback(null, true)
+    }
+    
+    // Reject other origins
+    console.warn(`⚠️  CORS blocked origin: ${origin}`)
+    console.warn(`   Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`)
+    callback(new Error('Not allowed by CORS'))
+  },
   credentials: true, // Allow cookies to be sent
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
