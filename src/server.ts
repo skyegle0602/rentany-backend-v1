@@ -197,9 +197,14 @@ app.use('/api/disputes', disputesRouter)
 
 // 404 handler
 app.use((req: Request, res: Response) => {
+  console.warn(`⚠️  404 - Route not found: ${req.method} ${req.originalUrl || req.url}`)
+  console.warn(`   Path: ${req.path}`)
+  console.warn(`   Query:`, req.query)
   res.status(404).json({
     success: false,
     error: 'Route not found',
+    path: req.originalUrl || req.url,
+    method: req.method,
   })
 })
 
