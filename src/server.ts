@@ -116,41 +116,30 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 // NOTE: This is now disabled as files are served from AWS S3
 // Keeping this commented for backward compatibility with old local files if needed
 // Files are now uploaded to S3 bucket 'rentany-uploads' via /api/file/upload endpoint
-/*
-app.use('/uploads', cors({
-  origin: (origin, callback) => {
-    // Allow requests from frontend URL or no origin (direct requests)
-    if (!origin || origin === FRONTEND_URL || origin.startsWith(FRONTEND_URL)) {
-      callback(null, true)
-    } else {
-      callback(null, true) // Allow all origins for now (can restrict in production)
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'OPTIONS', 'HEAD'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Range'],
-  exposedHeaders: ['Content-Length', 'Content-Type', 'Accept-Ranges'],
-  maxAge: 86400, // 24 hours
-}), express.static(path.join(process.cwd(), 'uploads'), {
-  // Add cache control headers
-  maxAge: '1d',
-  etag: true,
-  lastModified: true,
-  setHeaders: (res, filePath) => {
-    // Ensure CORS headers are explicitly set for all static file responses
-    res.setHeader('Access-Control-Allow-Origin', FRONTEND_URL || '*')
-    res.setHeader('Access-Control-Allow-Credentials', 'true')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS, HEAD')
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Range')
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Type, Accept-Ranges')
-    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
-  },
-}))
-*/
+
 
 // Clerk authentication middleware
 // This must be applied before routes to extract user data
 app.use(clerkAuth)
+
+// Root endpoint - return API information
+app.get('/', (req: Request, res: Response) => {
+  res.json({
+    success: true,
+    message: 'Rentany Backend API',
+    version: '1.0.0',
+    endpoints: {
+      health: '/api/health',
+      api: '/api',
+    },
+    timestamp: new Date().toISOString(),
+  })
+})
+
+// Favicon handler - return 204 No Content (standard for favicon)
+app.get('/favicon.ico', (req: Request, res: Response) => {
+  res.status(204).end() // 204 No Content - standard response for favicon
+})
 
 // Health check endpoint (public)
 app.get('/api/health', (req: Request, res: Response) => {
