@@ -15,8 +15,11 @@ export interface IUser extends Document {
   bio?: string
   preferred_language?: string
   role?: 'user' | 'admin'
-  stripe_account_id?: string
+  stripe_account_id?: string // Stripe Connect account ID (for owners receiving payments)
+  stripe_customer_id?: string // Stripe Customer ID (for renters making payments)
+  stripe_payment_method_id?: string // Stripe Payment Method ID (for renters - the card they use to pay)
   payouts_enabled?: boolean
+  intent?: 'renter' | 'owner' | 'both' // User's intended role on the platform
   
   // Notification preferences
   notification_preferences?: {
@@ -107,9 +110,20 @@ const UserSchema = new Schema<IUser>(
     stripe_account_id: {
       type: String,
     },
+    stripe_customer_id: {
+      type: String,
+    },
+    stripe_payment_method_id: {
+      type: String,
+    },
     payouts_enabled: {
       type: Boolean,
       default: false,
+    },
+    intent: {
+      type: String,
+      enum: ['renter', 'owner', 'both'],
+      default: undefined, // No default - must be set during onboarding
     },
     notification_preferences: {
       email_notifications: { type: Boolean, default: true },

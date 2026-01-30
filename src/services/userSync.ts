@@ -244,7 +244,10 @@ export function formatUserForAPI(user: IUser) {
     preferred_language: user.preferred_language,
     role: user.role,
     stripe_account_id: user.stripe_account_id,
+    stripe_customer_id: user.stripe_customer_id,
+    stripe_payment_method_id: user.stripe_payment_method_id,
     payouts_enabled: user.payouts_enabled,
+    intent: user.intent, // User's intended role on the platform
     notification_preferences: user.notification_preferences,
     push_subscription: user.push_subscription,
     documents: user.documents,

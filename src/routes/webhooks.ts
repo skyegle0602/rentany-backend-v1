@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express'
 import { Webhook } from 'svix'
 import { syncUserFromClerk } from '../services/userSync'
 import { CLERK_WEBHOOK_SECRET, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET } from '../config/env'
+import { isDatabaseConnected } from '../config/database'
 import Stripe from 'stripe'
 
 const router = Router()
@@ -188,45 +189,190 @@ router.post('/stripe', async (req: Request, res: Response) => {
   }
 
   console.log(`📥 Stripe webhook event received: ${event.type}`)
+  console.log(`📥 Event type (raw):`, JSON.stringify(event.type))
+  console.log(`📥 Event type (typeof):`, typeof event.type)
 
   try {
-    // Handle Stripe webhook events
-    // Handle account.updated event to mark users as verified when account becomes active
-    if (event.type === 'account.updated') {
-      const account = event.data.object as Stripe.Account
-      console.log('📋 Account updated event:', {
-        id: account.id,
-        details_submitted: account.details_submitted,
-        payouts_enabled: account.payouts_enabled,
+    // Check database connection
+    if (!isDatabaseConnected()) {
+      console.error('❌ Database is not connected. Cannot process webhook.')
+      return res.status(503).json({
+        success: false,
+        error: 'Database is not available',
       })
+    }
 
-      // Find user by stripe_account_id
-      const User = (await import('../models/users')).default
-      const { updateUser } = await import('../services/userSync')
-      const user = await User.findOne({ stripe_account_id: account.id })
+    // Handle Stripe webhook events
+    const User = (await import('../models/users')).default
+    const { updateUser } = await import('../services/userSync')
 
-      if (user) {
-        // Only mark as verified if account is fully connected and payouts are enabled
-        if (account.details_submitted && account.payouts_enabled) {
-          await updateUser(user.clerk_id, {
-            verification_status: 'verified',
-            payouts_enabled: true,
-          } as any)
-          console.log(`✅ Marked user ${user.clerk_id} as verified - account is active`)
+    // Use switch statement for cleaner event handling
+    console.log(`🔍 Processing event type: "${event.type}"`)
+    console.log(`🔍 About to enter switch statement...`)
+    
+    // Explicit check before switch
+    if (event.type === 'setup_intent.succeeded') {
+      console.log(`✅ MATCHED: setup_intent.succeeded via if statement`)
+    }
+    
+    switch (event.type) {
+      case 'account.updated': {
+        const account = event.data.object as Stripe.Account
+        console.log('📋 Account updated event:', {
+          id: account.id,
+          details_submitted: account.details_submitted,
+          payouts_enabled: account.payouts_enabled,
+        })
+
+        // Find user by stripe_account_id
+        const user = await User.findOne({ stripe_account_id: account.id })
+
+        if (user) {
+          // Only mark as verified if account is fully connected and payouts are enabled
+          if (account.details_submitted && account.payouts_enabled) {
+            await updateUser(user.clerk_id, {
+              verification_status: 'verified',
+              payouts_enabled: true,
+            } as any)
+            console.log(`✅ Marked user ${user.clerk_id} as verified - account is active`)
+          } else {
+            // Account exists but not fully connected yet
+            await updateUser(user.clerk_id, {
+              payouts_enabled: account.payouts_enabled || false,
+              verification_status: 'unverified',
+            } as any)
+            console.log(`ℹ️  User ${user.clerk_id} account not fully connected yet`)
+          }
         } else {
-          // Account exists but not fully connected yet
-          await updateUser(user.clerk_id, {
-            payouts_enabled: account.payouts_enabled || false,
-            verification_status: 'unverified', // Not verified until account is fully connected
-          } as any)
-          console.log(`ℹ️  User ${user.clerk_id} account not fully connected yet`)
+          console.warn(`⚠️  No user found with stripe_account_id: ${account.id}`)
         }
-      } else {
-        console.warn(`⚠️  No user found with stripe_account_id: ${account.id}`)
+        break
       }
-    } else {
-      console.log('ℹ️  Unhandled Stripe event type:', event.type)
-      console.log('   Add event handlers for specific event types as needed')
+
+      case 'setup_intent.succeeded': {
+        const setupIntent = event.data.object as Stripe.SetupIntent
+        console.log('💳 ===== SETUP INTENT SUCCEEDED EVENT =====')
+        console.log('📋 Setup Intent Details:', {
+          id: setupIntent.id,
+          customer: setupIntent.customer,
+          payment_method: setupIntent.payment_method,
+          status: setupIntent.status,
+        })
+
+        // Extract customer ID
+        if (!setupIntent.customer) {
+          console.warn(`⚠️  Setup intent has no customer field - skipping`)
+          break
+        }
+
+        if (!setupIntent.payment_method) {
+          console.warn(`⚠️  Setup intent has no payment_method field - skipping`)
+          break
+        }
+
+        const customerId = typeof setupIntent.customer === 'string' 
+          ? setupIntent.customer 
+          : (setupIntent.customer as Stripe.Customer).id
+
+        const paymentMethodId = typeof setupIntent.payment_method === 'string' 
+          ? setupIntent.payment_method 
+          : (setupIntent.payment_method as Stripe.PaymentMethod).id
+
+        console.log(`🔍 Looking up user with stripe_customer_id: ${customerId}`)
+        console.log(`💳 Payment method ID to save: ${paymentMethodId}`)
+
+        // Find user by stripe_customer_id
+        const user = await User.findOne({ stripe_customer_id: customerId })
+
+        if (!user) {
+          console.error(`❌ No user found with stripe_customer_id: ${customerId}`)
+          // Log all users with customer IDs for debugging
+          const allUsers = await User.find({ stripe_customer_id: { $exists: true } })
+          console.log(`   Found ${allUsers.length} users with stripe_customer_id:`)
+          allUsers.forEach(u => {
+            console.log(`     - ${u.email}: ${(u as any).stripe_customer_id}`)
+          })
+          break
+        }
+
+        console.log(`✅ Found user: ${user.email} (clerk_id: ${user.clerk_id})`)
+
+        // THIS IS THE CRITICAL PART - Save payment method ID to database
+        try {
+          const updatedUser = await updateUser(user.clerk_id, {
+            stripe_payment_method_id: paymentMethodId,
+          } as any)
+
+          if (updatedUser) {
+            console.log(`✅ SUCCESS: Saved payment method ${paymentMethodId} to database`)
+            console.log(`   User: ${user.email}`)
+            console.log(`   Payment Method ID: ${(updatedUser as any).stripe_payment_method_id}`)
+            console.log(`   Customer ID: ${(updatedUser as any).stripe_customer_id}`)
+          } else {
+            console.error(`❌ FAILED: updateUser returned null for user ${user.clerk_id}`)
+          }
+        } catch (updateError: any) {
+          console.error(`❌ ERROR saving payment method:`, updateError)
+          console.error(`   Message:`, updateError.message)
+          console.error(`   Stack:`, updateError.stack)
+        }
+        break
+      }
+
+      case 'payment_method.attached': {
+        const paymentMethod = event.data.object as Stripe.PaymentMethod
+        console.log('💳 ===== PAYMENT METHOD ATTACHED EVENT =====')
+        console.log('📋 Payment Method Details:', {
+          id: paymentMethod.id,
+          customer: paymentMethod.customer,
+          type: paymentMethod.type,
+        })
+
+        if (!paymentMethod.customer) {
+          console.warn(`⚠️  Payment method has no customer field - skipping`)
+          break
+        }
+
+        const customerId = typeof paymentMethod.customer === 'string' 
+          ? paymentMethod.customer 
+          : (paymentMethod.customer as Stripe.Customer).id
+
+        console.log(`🔍 Looking up user with stripe_customer_id: ${customerId}`)
+
+        // Find user by stripe_customer_id
+        const user = await User.findOne({ stripe_customer_id: customerId })
+
+        if (!user) {
+          console.error(`❌ No user found with stripe_customer_id: ${customerId}`)
+          break
+        }
+
+        console.log(`✅ Found user: ${user.email} (clerk_id: ${user.clerk_id})`)
+
+        // THIS IS THE CRITICAL PART - Save payment method ID to database
+        try {
+          const updatedUser = await updateUser(user.clerk_id, {
+            stripe_payment_method_id: paymentMethod.id,
+          } as any)
+
+          if (updatedUser) {
+            console.log(`✅ SUCCESS: Saved payment method ${paymentMethod.id} to database`)
+            console.log(`   User: ${user.email}`)
+            console.log(`   Payment Method ID: ${(updatedUser as any).stripe_payment_method_id}`)
+          } else {
+            console.error(`❌ FAILED: updateUser returned null for user ${user.clerk_id}`)
+          }
+        } catch (updateError: any) {
+          console.error(`❌ ERROR saving payment method:`, updateError)
+          console.error(`   Message:`, updateError.message)
+          console.error(`   Stack:`, updateError.stack)
+        }
+        break
+      }
+
+      default:
+        console.log(`ℹ️  Unhandled Stripe event type: ${event.type}`)
+        console.log('   Add event handlers for specific event types as needed')
     }
 
     console.log('✅ ===== STRIPE WEBHOOK PROCESSED SUCCESSFULLY =====')

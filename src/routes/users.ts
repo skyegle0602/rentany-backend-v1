@@ -105,6 +105,7 @@ router.put('/me', requireAuth, async (req: Request, res: Response) => {
       stripe_account_id,
       payouts_enabled,
       profile_picture,
+      intent,
     } = req.body
 
     const updateData: any = {}
@@ -133,6 +134,16 @@ router.put('/me', requireAuth, async (req: Request, res: Response) => {
     if (stripe_account_id !== undefined) updateData.stripe_account_id = stripe_account_id
     if (payouts_enabled !== undefined) updateData.payouts_enabled = payouts_enabled
     if (profile_picture !== undefined) updateData.profile_picture = profile_picture
+    if (intent !== undefined) {
+      // Validate intent value
+      if (!['renter', 'owner', 'both'].includes(intent)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Intent must be one of: renter, owner, both',
+        })
+      }
+      updateData.intent = intent
+    }
 
     // Check if there's anything to update
     if (Object.keys(updateData).length === 0) {
