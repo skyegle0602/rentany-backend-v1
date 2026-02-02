@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { requireAuth, getAuth } from '../middleware/clerk'
 import RentalRequest from '../models/rentalRequests'
+import ItemAvailability from '../models/itemAvailability'
 import { getOrSyncUser } from '../services/userSync'
 
 const router = Router()
@@ -75,6 +76,120 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       error: 'Failed to fetch rental requests',
+    })
+  }
+})
+
+/**
+ * POST /api/rental-requests/validate
+ * Validate if dates are available for rental
+ * Supports both date ranges and individual dates
+ * Requires authentication
+ */
+router.post('/validate', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const auth = getAuth(req)
+    const userId = auth?.userId
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required',
+      })
+    }
+
+    const { item_id, start_date, end_date, selected_dates } = req.body
+
+    if (!item_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'item_id is required',
+      })
+    }
+
+    // Get user to check verification status
+    const user = await getOrSyncUser(userId)
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found',
+      })
+    }
+
+    // Check if user is verified or admin
+    if (user.role !== 'admin' && user.verification_status !== 'verified') {
+      return res.json({
+        success: true,
+        data: {
+          available: false,
+          verification_required: true,
+        },
+      })
+    }
+
+    // Determine dates to check
+    let datesToCheck: Date[] = []
+
+    if (selected_dates && Array.isArray(selected_dates) && selected_dates.length > 0) {
+      // Individual dates selection
+      datesToCheck = selected_dates.map((d: string) => new Date(d))
+    } else if (start_date && end_date) {
+      // Date range selection
+      const start = new Date(start_date)
+      const end = new Date(end_date)
+      // Generate all dates in range
+      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        datesToCheck.push(new Date(d))
+      }
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'Either start_date/end_date or selected_dates array is required',
+      })
+    }
+
+    // Check for conflicts with existing blocked dates
+    const blockedDates = await ItemAvailability.find({
+      item_id,
+    })
+
+    // Check each date against blocked ranges
+    for (const checkDate of datesToCheck) {
+      const dateStr = checkDate.toISOString().split('T')[0] // Get YYYY-MM-DD format
+      
+      for (const block of blockedDates) {
+        const blockStart = new Date(block.blocked_start_date)
+        const blockEnd = new Date(block.blocked_end_date)
+        
+        // Normalize to date-only (remove time)
+        blockStart.setHours(0, 0, 0, 0)
+        blockEnd.setHours(0, 0, 0, 0)
+        checkDate.setHours(0, 0, 0, 0)
+        
+        // Check if date falls within blocked range
+        if (checkDate >= blockStart && checkDate <= blockEnd) {
+          return res.json({
+            success: true,
+            data: {
+              available: false,
+            },
+          })
+        }
+      }
+    }
+
+    // All dates are available
+    return res.json({
+      success: true,
+      data: {
+        available: true,
+      },
+    })
+  } catch (error) {
+    console.error('Error validating rental dates:', error)
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to validate dates',
     })
   }
 })

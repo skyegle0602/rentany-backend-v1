@@ -866,7 +866,7 @@ router.post('/payment-method/setup', requireAuth, async (req: Request, res: Resp
     // If origin contains /api or points to backend port, use FRONTEND_URL from env instead
     if (frontendOrigin.includes('/api') || 
         frontendOrigin.includes(':5000') || 
-        frontendOrigin.includes(':3001') ||
+        frontendOrigin.includes(':3000') ||
         frontendOrigin.match(/localhost:\d+/) && !frontendOrigin.includes(':3000')) {
       // Use FRONTEND_URL from environment
       frontendOrigin = FRONTEND_URL.replace(/\/+$/, '')
