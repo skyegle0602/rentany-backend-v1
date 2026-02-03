@@ -107,23 +107,12 @@ router.post('/validate', requireAuth, async (req: Request, res: Response) => {
       })
     }
 
-    // Get user to check verification status
+    // Get user (verification check removed - renters don't need to verify identity)
     const user = await getOrSyncUser(userId)
     if (!user) {
       return res.status(404).json({
         success: false,
         error: 'User not found',
-      })
-    }
-
-    // Check if user is verified or admin
-    if (user.role !== 'admin' && user.verification_status !== 'verified') {
-      return res.json({
-        success: true,
-        data: {
-          available: false,
-          verification_required: true,
-        },
       })
     }
 
@@ -153,10 +142,20 @@ router.post('/validate', requireAuth, async (req: Request, res: Response) => {
       item_id,
     })
 
-    // Check each date against blocked ranges
+    // Check for conflicts with existing rental requests (pending or approved)
+    // This prevents multiple renters from requesting the same dates
+    const existingRequests = await RentalRequest.find({
+      item_id,
+      status: { $in: ['pending', 'approved', 'paid'] }, // Check pending, approved, and paid requests
+    })
+
+    // Check each date against blocked ranges and existing rental requests
     for (const checkDate of datesToCheck) {
-      const dateStr = checkDate.toISOString().split('T')[0] // Get YYYY-MM-DD format
+      // Normalize check date to date-only (remove time)
+      const normalizedCheckDate = new Date(checkDate)
+      normalizedCheckDate.setHours(0, 0, 0, 0)
       
+      // Check against blocked dates
       for (const block of blockedDates) {
         const blockStart = new Date(block.blocked_start_date)
         const blockEnd = new Date(block.blocked_end_date)
@@ -164,10 +163,29 @@ router.post('/validate', requireAuth, async (req: Request, res: Response) => {
         // Normalize to date-only (remove time)
         blockStart.setHours(0, 0, 0, 0)
         blockEnd.setHours(0, 0, 0, 0)
-        checkDate.setHours(0, 0, 0, 0)
         
         // Check if date falls within blocked range
-        if (checkDate >= blockStart && checkDate <= blockEnd) {
+        if (normalizedCheckDate >= blockStart && normalizedCheckDate <= blockEnd) {
+          return res.json({
+            success: true,
+            data: {
+              available: false,
+            },
+          })
+        }
+      }
+
+      // Check against existing rental requests
+      for (const request of existingRequests) {
+        const requestStart = new Date(request.start_date)
+        const requestEnd = new Date(request.end_date)
+        
+        // Normalize to date-only (remove time)
+        requestStart.setHours(0, 0, 0, 0)
+        requestEnd.setHours(0, 0, 0, 0)
+        
+        // Check if date falls within existing request range
+        if (normalizedCheckDate >= requestStart && normalizedCheckDate <= requestEnd) {
           return res.json({
             success: true,
             data: {
@@ -221,21 +239,12 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
       })
     }
 
-    // Verify user exists and is verified (or admin)
-    // At MVP stage: Only users with Stripe payment integration can book/rent items
+    // Verify user exists (verification check removed - renters don't need to verify identity)
     const user = await getOrSyncUser(userId)
     if (!user) {
       return res.status(404).json({
         success: false,
         error: 'User not found',
-      })
-    }
-
-    // Check if user is verified or admin
-    if (user.role !== 'admin' && user.verification_status !== 'verified') {
-      return res.status(403).json({
-        success: false,
-        error: 'Stripe payment integration required to book items. Please connect your payment account.',
       })
     }
 
@@ -252,6 +261,54 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
     })
 
     await rentalRequest.save()
+
+    // If request is approved (instant booking), automatically block the dates
+    if (rentalRequest.status === 'approved') {
+      try {
+        // Block each date in the range
+        const start = new Date(rentalRequest.start_date)
+        const end = new Date(rentalRequest.end_date)
+        
+        // Generate all dates in range
+        const datesToBlock: Date[] = []
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+          datesToBlock.push(new Date(d))
+        }
+
+        // Block each date individually
+        for (const date of datesToBlock) {
+          const startOfDay = new Date(date)
+          startOfDay.setHours(0, 0, 0, 0)
+          const endOfDay = new Date(date)
+          endOfDay.setHours(23, 59, 59, 999)
+
+          // Check if date is already blocked
+          const existingBlock = await ItemAvailability.findOne({
+            item_id: rentalRequest.item_id,
+            $or: [
+              {
+                blocked_start_date: { $lte: endOfDay },
+                blocked_end_date: { $gte: startOfDay },
+              },
+            ],
+          })
+
+          if (!existingBlock) {
+            const blockedRange = new ItemAvailability({
+              item_id: rentalRequest.item_id,
+              blocked_start_date: startOfDay,
+              blocked_end_date: endOfDay,
+              reason: 'rented',
+            })
+            await blockedRange.save()
+            console.log(`✅ Auto-blocked date ${date.toISOString().split('T')[0]} for approved rental request ${rentalRequest._id}`)
+          }
+        }
+      } catch (error) {
+        console.error('Error auto-blocking dates for approved request:', error)
+        // Don't fail the request creation if blocking fails
+      }
+    }
 
     // Format response
     const formattedRequest = {
@@ -318,6 +375,11 @@ router.put('/:id', requireAuth, async (req: Request, res: Response) => {
       updateData.message = req.body.message?.trim()
     }
 
+    // Get the original request to check if status is changing to approved
+    const originalRequest = await RentalRequest.findById(id)
+    const wasApproved = originalRequest?.status === 'approved'
+    const isBeingApproved = updateData.status === 'approved' && !wasApproved
+
     const rentalRequest = await RentalRequest.findByIdAndUpdate(
       id,
       updateData,
@@ -329,6 +391,54 @@ router.put('/:id', requireAuth, async (req: Request, res: Response) => {
         success: false,
         error: 'Rental request not found',
       })
+    }
+
+    // If request is being approved, automatically block the dates
+    if (isBeingApproved) {
+      try {
+        // Block each date in the range
+        const start = new Date(rentalRequest.start_date)
+        const end = new Date(rentalRequest.end_date)
+        
+        // Generate all dates in range
+        const datesToBlock: Date[] = []
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+          datesToBlock.push(new Date(d))
+        }
+
+        // Block each date individually
+        for (const date of datesToBlock) {
+          const startOfDay = new Date(date)
+          startOfDay.setHours(0, 0, 0, 0)
+          const endOfDay = new Date(date)
+          endOfDay.setHours(23, 59, 59, 999)
+
+          // Check if date is already blocked
+          const existingBlock = await ItemAvailability.findOne({
+            item_id: rentalRequest.item_id,
+            $or: [
+              {
+                blocked_start_date: { $lte: endOfDay },
+                blocked_end_date: { $gte: startOfDay },
+              },
+            ],
+          })
+
+          if (!existingBlock) {
+            const blockedRange = new ItemAvailability({
+              item_id: rentalRequest.item_id,
+              blocked_start_date: startOfDay,
+              blocked_end_date: endOfDay,
+              reason: 'rented',
+            })
+            await blockedRange.save()
+            console.log(`✅ Auto-blocked date ${date.toISOString().split('T')[0]} for approved rental request ${rentalRequest._id}`)
+          }
+        }
+      } catch (error) {
+        console.error('Error auto-blocking dates for approved request:', error)
+        // Don't fail the update if blocking fails
+      }
     }
 
     // Format response

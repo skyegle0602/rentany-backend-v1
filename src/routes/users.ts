@@ -285,6 +285,88 @@ router.post('/sync', requireAuth, async (req: Request, res: Response) => {
 })
 
 /**
+ * GET /api/users/for-chat
+ * Get user by email for chat/conversation purposes
+ * Query parameter: ?email=user@example.com
+ * Returns user data in format: { user: UserData }
+ */
+router.get('/for-chat', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const email = req.query.email as string
+    
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email parameter is required',
+      })
+    }
+
+    const user = await getUserByEmail(email)
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found',
+      })
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        user: formatUserForAPI(user),
+      },
+    })
+  } catch (error) {
+    console.error('Error in GET /api/users/for-chat:', error)
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Internal server error',
+    })
+  }
+})
+
+/**
+ * GET /api/users/chat
+ * Get user by email for chat/conversation purposes (alias for /for-chat)
+ * Query parameter: ?email=user@example.com
+ * Returns user data in format: { user: UserData }
+ */
+router.get('/chat', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const email = req.query.email as string
+    
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email parameter is required',
+      })
+    }
+
+    const user = await getUserByEmail(email)
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found',
+      })
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        user: formatUserForAPI(user),
+      },
+    })
+  } catch (error) {
+    console.error('Error in GET /api/users/chat:', error)
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Internal server error',
+    })
+  }
+})
+
+/**
  * POST /api/users/reset-my-verification
  * Reset current user's verification_status to 'unverified'
  * Useful for fixing users who were incorrectly marked as verified from Clerk email verification

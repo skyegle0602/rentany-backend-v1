@@ -168,6 +168,10 @@ import walletRouter from './routes/wallet'
 import payoutsRouter from './routes/payouts'
 import rentalRequestsRouter from './routes/rentalRequests'
 import disputesRouter from './routes/disputes'
+import messagesRouter from './routes/messages'
+import rentalExtensionsRouter from './routes/rentalExtensions'
+import conditionReportsRouter from './routes/conditionReports'
+import typingIndicatorsRouter from './routes/typingIndicators'
 
 // Mount route handlers
 app.use('/api/users', usersRouter)
@@ -183,6 +187,10 @@ app.use('/api/wallet', walletRouter)
 app.use('/api/payouts', payoutsRouter)
 app.use('/api/rental-requests', rentalRequestsRouter)
 app.use('/api/disputes', disputesRouter)
+app.use('/api/messages', messagesRouter)
+app.use('/api/rental-extensions', rentalExtensionsRouter)
+app.use('/api/condition-reports', conditionReportsRouter)
+app.use('/api/typing-indicators', typingIndicatorsRouter)
 
 // 404 handler
 app.use((req: Request, res: Response) => {

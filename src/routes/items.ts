@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express'
 import { requireAuth } from '../middleware/clerk'
 import Item, { IItem } from '../models/items'
 import { isDatabaseConnected } from '../config/database'
-import { getOrSyncUser } from '../services/userSync'
+import { getOrSyncUser, formatUserForAPI } from '../services/userSync'
 import Review from '../models/reviews'
 import ViewedItem from '../models/viewedItems'
 import Favorite from '../models/favorites'
@@ -266,6 +266,20 @@ router.get('/:id', async (req: Request, res: Response) => {
       })
     }
 
+    // Fetch owner user data
+    let ownerData = null
+    if (item.owner_id) {
+      try {
+        const ownerUser = await getOrSyncUser(item.owner_id)
+        if (ownerUser) {
+          ownerData = formatUserForAPI(ownerUser)
+        }
+      } catch (error) {
+        console.error('Error fetching owner data:', error)
+        // Continue without owner data if fetch fails
+      }
+    }
+
     // Format item for API response
     const formattedItem = {
       id: item._id.toString(),
@@ -298,11 +312,15 @@ router.get('/:id', async (req: Request, res: Response) => {
       status: item.status || 'active',
       created_at: item.created_at?.toISOString() || new Date().toISOString(),
       updated_at: item.updated_at?.toISOString() || new Date().toISOString(),
+      created_by: ownerData?.email || item.owner_id, // For backward compatibility
     }
 
     res.json({
       success: true,
-      data: formattedItem,
+      data: {
+        item: formattedItem,
+        owner: ownerData,
+      },
     })
   } catch (error) {
     console.error('Error fetching item:', error)
